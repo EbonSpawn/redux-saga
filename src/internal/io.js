@@ -1,13 +1,4 @@
-import { sym, is, kTrue, ident, check, TASK } from './utils'
-
-
-export const CALL_FUNCTION_ARG_ERROR = "call/cps/fork first argument must be a function, an array [context, function] or an object {context, fn}"
-export const FORK_ARG_ERROR   = "fork first argument must be a generator function or an iterator"
-export const JOIN_ARG_ERROR   = "join argument must be a valid task (a result of a fork)"
-export const CANCEL_ARG_ERROR = "cancel argument must be a valid task (a result of a fork)"
-export const INVALID_PATTERN  = "Invalid pattern passed to `take` (HINT: check if you didn't misspell a constant)"
-export const SELECT_ARG_ERROR = "select first argument must be a function"
-
+import { sym, is, ident, check, TASK } from './utils'
 
 const IO      = sym('IO')
 const TAKE    = 'TAKE'
@@ -19,43 +10,56 @@ const FORK    = 'FORK'
 const JOIN    = 'JOIN'
 const CANCEL  = 'CANCEL'
 const SELECT  = 'SELECT'
+const ACTION_CHANNEL = 'ACTION_CHANNEL'
+const CANCELLED  = 'CANCELLED'
+const FLUSH  = 'FLUSH'
 
-const effect = (type, payload) => ({ [IO]: true, [type]: payload })
+const effect = (type, payload) => ({[IO]: true, [type]: payload})
 
-const matchers = {
-  wildcard  : () => kTrue,
-  default   : pattern => input => input.type === pattern,
-  array     : patterns => input => patterns.some( p => p === input.type ),
-  predicate : predicate => input => predicate(input)
-}
-
-export function matcher(pattern) {
-  return (
-      pattern === '*'   ? matchers.wildcard
-    : is.array(pattern) ? matchers.array
-    : is.func(pattern)  ? matchers.predicate
-    : matchers.default
-  )(pattern)
-}
-
-export function take(pattern){
-  if (arguments.length > 0 && is.undef(pattern)) {
-    throw new Error(INVALID_PATTERN)
+export function take(patternOrChannel = '*') {
+  if (arguments.length) {
+    check(arguments[0], is.notUndef, 'take(patternOrChannel): patternOrChannel is undefined')
   }
-
-  return effect(TAKE, is.undef(pattern) ? '*' : pattern)
+  if (is.pattern(patternOrChannel)) {
+    return effect(TAKE, { pattern: patternOrChannel })
+  }
+  if (is.channel(patternOrChannel)) {
+    return effect(TAKE, { channel: patternOrChannel })
+  }
+  throw new Error(`take(patternOrChannel): argument ${String(patternOrChannel)} is not valid channel or a valid pattern`)
 }
 
-export function put(action) {
-  return effect(PUT, action)
+export function takem(...args) {
+  const eff = take(...args)
+  eff[TAKE].maybe = true
+  return eff
+}
+
+export function put(channel, action) {
+  if(arguments.length > 1) {
+    check(channel, is.notUndef, 'put(channel, action): argument channel is undefined')
+    check(channel, is.channel, `put(channel, action): argument ${channel} is not a valid channel`)
+    check(action, is.notUndef, 'put(channel, action): argument action is undefined')
+  } else {
+    check(channel, is.notUndef, 'put(action): argument action is undefined')
+    action = channel
+    channel = null
+  }
+  return effect(PUT, {channel, action})
+}
+
+put.sync = (...args) => {
+  const eff = put(...args)
+  eff[PUT].sync = true
+  return eff
 }
 
 export function race(effects) {
   return effect(RACE, effects)
 }
 
-function getFnCallDesc(fn, args) {
-  check(fn, is.notUndef, CALL_FUNCTION_ARG_ERROR)
+function getFnCallDesc(meth, fn, args) {
+  check(fn, is.notUndef, `${meth}: argument fn is undefined`)
 
   let context = null
   if(is.array(fn)) {
@@ -63,28 +67,28 @@ function getFnCallDesc(fn, args) {
   } else if(fn.fn) {
     ({context, fn} = fn)
   }
-  check(fn, is.func, CALL_FUNCTION_ARG_ERROR)
+  check(fn, is.func, `${meth}: argument ${fn} is not a function`)
 
   return {context, fn, args}
 }
 
 export function call(fn, ...args) {
-  return effect(CALL, getFnCallDesc(fn, args))
+  return effect(CALL, getFnCallDesc('call', fn, args))
 }
 
 export function apply(context, fn, args = []) {
-  return effect(CALL, getFnCallDesc({context, fn}, args))
+  return effect(CALL, getFnCallDesc('apply', {context, fn}, args))
 }
 
 export function cps(fn, ...args) {
-  return effect(CPS, getFnCallDesc(fn, args))
+  return effect(CPS, getFnCallDesc('cps', fn, args))
 }
 
 export function fork(fn, ...args) {
-  return effect(FORK, getFnCallDesc(fn, args))
+  return effect(FORK, getFnCallDesc('fork', fn, args))
 }
 
-fork.detached = (fn, ...args) => {
+export function spawn(fn, ...args) {
   const eff = fork(fn, ...args)
   eff[FORK].detached = true
   return eff
@@ -92,29 +96,54 @@ fork.detached = (fn, ...args) => {
 
 const isForkedTask = task => task[TASK]
 
-export function join(taskDesc) {
-  if(!isForkedTask(taskDesc))
-    throw new Error(JOIN_ARG_ERROR)
+export function join(task) {
+  check(task, is.notUndef, 'join(task): argument task is undefined')
+  if(!isForkedTask(task)) {
+    throw new Error(`join(task): argument ${task} is not a valid Task object \n(HINT: if you are getting this errors in tests, consider using createMockTask from redux-saga/utils)`)
+  }
 
-  return effect(JOIN, taskDesc)
+  return effect(JOIN, task)
 }
 
-export function cancel(taskDesc) {
-  if(!isForkedTask(taskDesc))
-    throw new Error(CANCEL_ARG_ERROR)
+export function cancel(task) {
+  check(task, is.notUndef, 'cancel(task): argument task is undefined')
+  if(!isForkedTask(task)) {
+    throw new Error(`cancel(task): argument ${task} is not a valid Task object \n(HINT: if you are getting this errors in tests, consider using createMockTask from redux-saga/utils)`)
+  }
 
-  return effect(CANCEL, taskDesc)
+  return effect(CANCEL, task)
 }
 
 export function select(selector, ...args) {
   if(arguments.length === 0) {
     selector = ident
   } else {
-    check(selector, is.func, SELECT_ARG_ERROR)
+    check(selector, is.notUndef, 'select(selector,[...]): argument selector is undefined')
+    check(selector, is.func, `select(selector,[...]): argument ${selector} is not a function`)
   }
   return effect(SELECT, {selector, args})
 }
 
+/**
+  channel(pattern, [buffer])    => creates an event channel for store actions
+**/
+export function actionChannel(pattern, buffer) {
+  check(pattern, is.notUndef, 'actionChannel(pattern,...): argument pattern is undefined')
+  if(arguments.length > 1) {
+    check(buffer, is.notUndef, 'actionChannel(pattern, buffer): argument buffer is undefined')
+    check(buffer, is.notUndef, `actionChannel(pattern, buffer): argument ${buffer} is not a valid buffer`)
+  }
+  return effect(ACTION_CHANNEL, {pattern, buffer})
+}
+
+export function cancelled() {
+  return effect(CANCELLED, {})
+}
+
+export function flush(channel) {
+  check(channel, is.channel, `flush(channel): argument ${channel} is not valid channel`)
+  return effect(FLUSH, channel)
+}
 
 export const asEffect = {
   take    : effect => effect && effect[IO] && effect[TAKE],
@@ -125,5 +154,8 @@ export const asEffect = {
   fork    : effect => effect && effect[IO] && effect[FORK],
   join    : effect => effect && effect[IO] && effect[JOIN],
   cancel  : effect => effect && effect[IO] && effect[CANCEL],
-  select  : effect => effect && effect[IO] && effect[SELECT]
+  select  : effect => effect && effect[IO] && effect[SELECT],
+  actionChannel : effect => effect && effect[IO] && effect[ACTION_CHANNEL],
+  cancelled  : effect => effect && effect[IO] && effect[CANCELLED],
+  flush  : effect => effect && effect[IO] && effect[FLUSH]
 }

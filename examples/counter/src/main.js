@@ -7,18 +7,17 @@ import { createStore, applyMiddleware } from 'redux'
 import createSagaMiddleware from 'redux-saga'
 import sagaMonitor from '../../sagaMonitor'
 
-import Counter from './Components/Counter'
+import Counter from './components/Counter'
 import reducer from './reducers'
 import rootSaga from './sagas'
 
 
+const sagaMiddleware = createSagaMiddleware({sagaMonitor})
 const store = createStore(
   reducer,
-  applyMiddleware(
-    sagaMonitor,
-    createSagaMiddleware(rootSaga)
-  )
+  applyMiddleware(sagaMiddleware)
 )
+sagaMiddleware.run(rootSaga)
 
 const action = type => store.dispatch({type})
 

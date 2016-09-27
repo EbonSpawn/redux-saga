@@ -38,7 +38,7 @@ function* saga() {
   yield call(ApiFn, ...args)      // Blocking: will wait for ApiFn (If ApiFn returns a Promise)
   yield call(otherSaga, ...args)  // Blocking: will wait for otherSaga to terminate
 
-  yied put(...)                   // Blocking: will dispatch asynchronously (using Promis.then)
+  yield put(...)                   // Blocking: will dispatch asynchronously (using Promise.then)
 
   const task = yield fork(otherSaga, ...args)  // Non-blocking: will not wait for otherSaga
   yield cancel(task)                           // Non-blocking: will resume immediately
@@ -59,13 +59,13 @@ example
 
 ```javascript
 function* watcher() {
-  while(true) {
+  while (true) {
     const action = yield take(ACTION)
-    yield fork(worker, action.paylaod)
+    yield fork(worker, action.payload)
   }
 }
 
-function* worker(paylaod) {
+function* worker(payload) {
   // ... do some stuff
 }
 ```

@@ -53,43 +53,6 @@ test('proc fork handling: generators', assert => {
 
 });
 
-test('proc detects fork\'s synchronous failures and fails the forked task', assert => {
-  assert.plan(1);
-
-  let actual = []
-  const dispatch = v => (actual.push(v), v)
-
-
-  function* genFnChild() {
-    throw "child error"
-  }
-
-  function* genFnParent() {
-    try {
-      yield io.put("start parent")
-      const task = yield io.fork(genFnChild);
-      const taskError = task.error()
-      if(taskError)
-        actual.push(taskError)
-
-      yield io.put("success parent")
-    }
-    catch (e) {
-      yield io.put("failure parent")
-    }
-  }
-
-  proc(genFnParent(),undefined,dispatch).done.catch(err => assert.fail(err))
-
-
-  const expected = ['start parent','child error','success parent'];
-  setTimeout(() => {
-    assert.deepEqual(actual, expected,"proc should inject fork errors into forked tasks")
-    assert.end()
-  }, 0)
-
-});
-
 test('proc join handling : generators', assert => {
   assert.plan(1);
 
@@ -144,15 +107,21 @@ test('proc fork/join handling : functions', assert => {
     return defs[1].promise
   }
 
+  function syncFn() {
+    return 'sync'
+  }
+
   function* genFn() {
     const task = yield io.fork(api)
+    const syncTask = yield io.fork(syncFn)
 
     actual.push( yield defs[0].promise )
     actual.push( yield io.join(task)  )
+    actual.push( yield io.join(syncTask)  )
   }
 
   proc(genFn()).done.catch(err => assert.fail(err))
-  const expected = [true, 2]
+  const expected = [true, 2, 'sync']
 
   setTimeout(() => {
 
@@ -216,7 +185,7 @@ test('proc auto cancel forks on error', assert => {
   assert.plan(1)
 
   const actual = []
-  const rootDef = deferred()
+  const mainDef = deferred()
   const childAdef = deferred()
   const childBdef = deferred()
   const defs = arrayOfDeffered(4)
@@ -226,8 +195,7 @@ test('proc auto cancel forks on error', assert => {
     .then(() => defs[0].resolve('leaf 1 resolved'))
     .then(() => childBdef.resolve('childB resolved'))
     .then(() => defs[1].resolve('leaf 2 resolved'))
-    //.then(() => new Promise(r => setTimeout(r,0)))
-    .then(() => rootDef.reject('root error'))
+    .then(() => mainDef.reject('main error'))
     //
     .then(() => defs[2].resolve('leaf 3 resolved'))
     .then(() => defs[3].resolve('leaf 4 resolved'))
@@ -236,38 +204,329 @@ test('proc auto cancel forks on error', assert => {
   function* root() {
     try {
       actual.push( yield io.call(main) )
-    } catch (e) {
-      actual.push(e)
+    } catch(e) {
+      actual.push('root caught ' + e)
     }
   }
 
   function* main() {
-    yield io.fork(childA)
-    yield io.fork(childB)
-    actual.push( yield rootDef.promise )
+    try {
+      yield io.fork(childA)
+      yield io.fork(childB)
+      actual.push( yield mainDef.promise )
+    } catch (e) {
+      actual.push(e)
+      throw e
+    } finally {
+      if(yield io.cancelled())
+        actual.push('main cancelled')
+    }
   }
 
   function* childA() {
-    yield io.fork(leaf, 0)
-    actual.push( yield childAdef.promise )
-    yield io.fork(leaf, 1)
+    try {
+      yield io.fork(leaf, 0)
+      actual.push( yield childAdef.promise )
+      yield io.fork(leaf, 1)
+    } finally {
+      if(yield io.cancelled())
+        actual.push('childA cancelled')
+    }
   }
 
   function* childB() {
-    yield io.fork(leaf, 2)
-    yield io.fork(leaf, 3)
-    actual.push( yield childBdef.promise )
+    try {
+      yield io.fork(leaf, 2)
+      yield io.fork(leaf, 3)
+      actual.push( yield childBdef.promise )
+    } finally {
+      if(yield io.cancelled())
+        actual.push('childB cancelled')
+    }
   }
 
   function* leaf(idx) {
-    actual.push( yield defs[idx].promise )
+    try {
+      actual.push( yield defs[idx].promise )
+    } finally {
+      if(yield io.cancelled())
+        actual.push(`leaf ${idx+1} cancelled`)
+    }
   }
 
   const expected = [
-    'childA resolved', 'leaf 1 resolved', 'childB resolved', 'leaf 2 resolved', 'root error'
+    'childA resolved', 'leaf 1 resolved', 'childB resolved', 'leaf 2 resolved', 'main error',
+    'leaf 3 cancelled', 'leaf 4 cancelled', 'root caught main error'
   ]
   proc(root()).done.then(() => {
     assert.deepEqual(actual, expected, 'parent task must cancel all forked tasks when it aborts')
   }).catch(err => assert.fail(err))
 
+})
+
+test('proc auto cancel forks on main cancelled', assert => {
+  assert.plan(1)
+
+  const actual = []
+  const rootDef = deferred()
+  const mainDef = deferred()
+  const childAdef = deferred()
+  const childBdef = deferred()
+  const defs = arrayOfDeffered(4)
+
+  Promise.resolve()
+    .then(() => childAdef.resolve('childA resolved'))
+    .then(() => defs[0].resolve('leaf 1 resolved'))
+    .then(() => childBdef.resolve('childB resolved'))
+    .then(() => defs[1].resolve('leaf 2 resolved'))
+    .then(() => rootDef.resolve('root resolved'))
+    //.then(() => new Promise(r => setTimeout(r,0)))
+    .then(() => mainDef.resolve('main resolved'))
+    .then(() => defs[2].resolve('leaf 3 resolved'))
+    .then(() => defs[3].resolve('leaf 4 resolved'))
+
+
+  function* root() {
+    try {
+      const task = yield io.fork(main)
+      actual.push( yield rootDef.promise )
+      yield io.cancel(task)
+    } catch (e) {
+      actual.push('root caught ' + e)
+    }
+  }
+
+  function* main() {
+    try {
+      yield io.fork(childA)
+      yield io.fork(childB)
+      actual.push( yield mainDef.promise )
+    } finally {
+      if(yield io.cancelled())
+        actual.push('main cancelled')
+    }
+  }
+
+  function* childA() {
+    try {
+      yield io.fork(leaf, 0)
+      actual.push( yield childAdef.promise )
+      yield io.fork(leaf, 1)
+    } finally {
+      if(yield io.cancelled())
+        actual.push('childA cancelled')
+    }
+  }
+
+  function* childB() {
+    try {
+      yield io.fork(leaf, 2)
+      yield io.fork(leaf, 3)
+      actual.push( yield childBdef.promise )
+    } finally {
+      if(yield io.cancelled())
+        actual.push('childB cancelled')
+    }
+  }
+
+  function* leaf(idx) {
+    try {
+      actual.push( yield defs[idx].promise )
+    } finally {
+      if(yield io.cancelled())
+        actual.push(`leaf ${idx+1} cancelled`)
+    }
+  }
+
+  const expected = [
+    'childA resolved', 'leaf 1 resolved', 'childB resolved', 'leaf 2 resolved', 'root resolved',
+    'main cancelled', 'leaf 3 cancelled', 'leaf 4 cancelled'
+  ]
+  proc(root()).done.then(() => {
+    assert.deepEqual(actual, expected, 'parent task must cancel all forked tasks when it\'s cancelled')
+  }).catch(err => assert.fail(err))
+
+})
+
+test('proc auto cancel forks if a child aborts', assert => {
+   assert.plan(1)
+
+  const actual = []
+  /*
+  const _push = actual.push
+  actual.push = (arg) => {
+    console.log(arg)
+    _push.call(actual, arg)
+  }
+  */
+  const mainDef = deferred()
+  const childAdef = deferred()
+  const childBdef = deferred()
+  const defs = arrayOfDeffered(4)
+
+  Promise.resolve()
+    .then(() => childAdef.resolve('childA resolved'))
+    .then(() => defs[0].resolve('leaf 1 resolved'))
+    .then(() => childBdef.resolve('childB resolved'))
+    .then(() => defs[1].resolve('leaf 2 resolved'))
+    .then(() => mainDef.resolve('main resolved'))
+
+    .then(() => defs[2].reject('leaf 3 error'))
+    .then(() => defs[3].resolve('leaf 4 resolved'))
+
+
+  function* root() {
+    try {
+      actual.push( yield io.call(main) )
+    } catch (e) {
+      actual.push('root caught ' + e)
+    }
+  }
+
+  function* main() {
+    try {
+      yield io.fork(childA)
+      yield io.fork(childB)
+      actual.push( yield mainDef.promise )
+      return 'main returned'
+    } finally {
+      if(yield io.cancelled())
+        actual.push('main cancelled')
+    }
+  }
+
+  function* childA() {
+    try {
+      yield io.fork(leaf, 0)
+      actual.push( yield childAdef.promise )
+      yield io.fork(leaf, 1)
+    } finally {
+      if(yield io.cancelled())
+        actual.push('childA cancelled')
+    }
+  }
+
+  function* childB() {
+    try {
+      yield io.fork(leaf, 2)
+      yield io.fork(leaf, 3)
+      actual.push( yield childBdef.promise )
+    } finally {
+      if(yield io.cancelled())
+        actual.push('childB cancelled')
+    }
+  }
+
+  function* leaf(idx) {
+    try {
+      actual.push( yield defs[idx].promise )
+    } catch (e) {
+      actual.push(e)
+      throw e
+    } finally {
+      if(yield io.cancelled())
+        actual.push(`leaf ${idx+1} cancelled`)
+    }
+  }
+
+  const expected = [
+    'childA resolved', 'leaf 1 resolved', 'childB resolved', 'leaf 2 resolved', 'main resolved',
+    'leaf 3 error', 'leaf 4 cancelled', 'root caught leaf 3 error'
+  ]
+  proc(root()).done.then(() => {
+    assert.deepEqual(actual, expected, 'parent task must cancel all forked tasks when it aborts')
+  }).catch(err => assert.fail(err))
+})
+
+test('proc auto cancel parent + forks if a child aborts', assert => {
+   assert.plan(1)
+
+  const actual = []
+  /*
+  const _push = actual.push
+  actual.push = (arg) => {
+    console.log(arg)
+    _push.call(actual, arg)
+  }
+  */
+  const mainDef = deferred()
+  const childAdef = deferred()
+  const childBdef = deferred()
+  const defs = arrayOfDeffered(4)
+
+  Promise.resolve()
+    .then(() => childAdef.resolve('childA resolved'))
+    .then(() => defs[0].resolve('leaf 1 resolved'))
+    .then(() => childBdef.resolve('childB resolved'))
+    .then(() => defs[1].resolve('leaf 2 resolved'))
+    .then(() => defs[2].reject('leaf 3 error'))
+
+    .then(() => mainDef.resolve('main resolved'))
+    .then(() => defs[3].resolve('leaf 4 resolved'))
+
+
+  function* root() {
+    try {
+      actual.push( yield io.call(main) )
+    } catch (e) {
+      actual.push('root caught ' + e)
+    }
+  }
+
+  function* main() {
+    try {
+      yield io.fork(childA)
+      yield io.fork(childB)
+      actual.push( yield mainDef.promise )
+      return 'main returned'
+    } catch (e) {
+      actual.push(e)
+      throw e
+    } finally {
+      if(yield io.cancelled())
+        actual.push('main cancelled')
+    }
+  }
+
+  function* childA() {
+    try {
+      yield io.fork(leaf, 0)
+      actual.push( yield childAdef.promise )
+      yield io.fork(leaf, 1)
+    } finally {
+      if(yield io.cancelled())
+        actual.push('childA cancelled')
+    }
+  }
+
+  function* childB() {
+    try {
+      yield io.fork(leaf, 2)
+      yield io.fork(leaf, 3)
+      actual.push( yield childBdef.promise )
+    } finally {
+      if(yield io.cancelled())
+        actual.push('childB cancelled')
+    }
+  }
+
+  function* leaf(idx) {
+    try {
+      actual.push( yield defs[idx].promise )
+    } catch (e) {
+      actual.push(e)
+      throw e
+    } finally {
+      if(yield io.cancelled())
+        actual.push(`leaf ${idx+1} cancelled`)
+    }
+  }
+
+  const expected = [
+    'childA resolved', 'leaf 1 resolved', 'childB resolved', 'leaf 2 resolved',
+    'leaf 3 error', 'leaf 4 cancelled', 'main cancelled', 'root caught leaf 3 error'
+  ]
+  proc(root()).done.then(() => {
+    assert.deepEqual(actual, expected, 'parent task must cancel all forked tasks when it aborts')
+  }).catch(err => assert.fail(err))
 })

@@ -2,8 +2,10 @@
 
 import test from 'tape'
 import { createStore, applyMiddleware } from 'redux'
-import sagaMiddleware from '../../src'
+import sagaMiddleware, { takeEvery, END } from '../../src'
 import { take, put, fork, join, call, race, cancel } from '../../src/effects'
+import {channel} from '../../src/internal/channel'
+import {buffers} from '../../src/internal/buffers'
 
 
 test('synchronous sequential takes', assert => {
@@ -130,7 +132,7 @@ test('synchronous parallel + concurrent takes', assert => {
 
 });
 
-// see https://github.com/reactjs/redux/issues/1240
+//see https://github.com/reactjs/redux/issues/1240
 test('startup actions', assert => {
   assert.plan(1);
 
@@ -208,6 +210,43 @@ test('synchronous takes + puts', assert => {
 
 });
 
+test('synchronous takes (from a channel) + puts (to the store)', assert => {
+  assert.plan(1);
+
+  const actual = []
+  const chan = channel()
+
+  function reducer(state, action) {
+    if(action.type === 'a')
+      actual.push(action.payload)
+    return true
+  }
+
+  const middleware = sagaMiddleware()
+  const store = createStore(reducer, applyMiddleware(middleware))
+  middleware.run(root)
+
+  function* root() {
+    actual.push( (yield take(chan, 'a')).payload )
+    yield put({type: 'a', payload: 'ack-1'})
+    actual.push( (yield take(chan, 'a')).payload )
+    yield put({type: 'a', payload: 'ack-2'})
+    yield take('never-happenning-action')
+  }
+
+  chan.put({type: 'a', payload: 1})
+  chan.put({type: 'a', payload: 2})
+  chan.close()
+
+  Promise.resolve(). then(() => {
+    assert.deepEqual(actual, [1, 'ack-1', 2, 'ack-2'],
+      "Sagas must be able to interleave takes (from a channel) and puts (to the store) without losing actions"
+    );
+    assert.end();
+  })
+
+});
+
 
 // see https://github.com/yelouafi/redux-saga/issues/50
 test('inter-saga put/take handling', assert => {
@@ -246,6 +285,50 @@ test('inter-saga put/take handling', assert => {
   Promise.resolve().then(() => {
     assert.deepEqual(actual, [1,2,3],
       "Sagas must take actins from each other"
+    );
+    assert.end();
+  })
+
+});
+
+test('inter-saga put/take handling (via buffered channel)', assert => {
+  assert.plan(1);
+
+  const actual = []
+  const chan = channel()
+
+  const middleware = sagaMiddleware()
+  const store = createStore(() => {}, applyMiddleware(middleware))
+
+  function* fnA() {
+    while(true) {
+      let action = yield take(chan)
+      yield call(someAction, action)
+    }
+  }
+
+  function* fnB() {
+    yield put(chan, 1)
+    yield put(chan, 2)
+    yield put(chan, 3)
+    yield call(chan.close)
+  }
+
+  function* someAction(action) {
+    actual.push(action)
+    yield Promise.resolve()
+  }
+
+  function* root() {
+    yield [
+      fork(fnA),
+      fork(fnB)
+    ]
+  }
+
+  middleware.run(root).done.then(() => {
+    assert.deepEqual(actual, [1,2,3],
+      "Sagas must take actions from each other (via buffered channel)"
     );
     assert.end();
   })
@@ -292,4 +375,153 @@ test('inter-saga send/aknowledge handling', assert => {
     assert.end();
   })
 
+});
+
+test('inter-saga send/aknowledge handling (via unbuffered channel)', assert => {
+  assert.plan(1);
+
+  const actual = []
+  // non buffered channel must behave like the store
+  const chan = channel(buffers.none())
+
+  const middleware = sagaMiddleware()
+  const store = createStore(() => {}, applyMiddleware(middleware))
+  middleware.run(root)
+
+
+  function* fnA() {
+    actual.push( yield take(chan) )
+    yield put(chan, 'ack-1')
+    actual.push( yield take(chan) )
+    yield put(chan, 'ack-2')
+  }
+
+  function* fnB() {
+    yield put(chan, 'msg-1')
+    actual.push( yield take(chan) )
+    yield put(chan, 'msg-2')
+    actual.push( yield take(chan) )
+  }
+
+  function* root() {
+    yield fork(fnA)
+    yield fork(fnB)
+  }
+
+
+
+  Promise.resolve().then(() => {
+    assert.deepEqual(actual, ['msg-1', 'ack-1', 'msg-2', 'ack-2'],
+      "Sagas must take actions from each other (via unbuffered channel) in the right order"
+    );
+    assert.end();
+  })
+
+});
+
+test('inter-saga send/aknowledge handling (via buffered channel)', assert => {
+  assert.plan(1);
+
+  const actual = []
+  const chan = channel()
+
+  const middleware = sagaMiddleware()
+  const store = createStore(() => {}, applyMiddleware(middleware))
+
+
+  function* fnA() {
+    actual.push( yield take(chan) )
+
+    yield put(chan, 'ack-1')
+    yield Promise.resolve()
+
+    actual.push( yield take(chan) )
+    yield put(chan, 'ack-2')
+  }
+
+  function* fnB() {
+    yield put(chan, 'msg-1')
+    yield Promise.resolve()
+
+    actual.push( yield take(chan) )
+
+    yield put(chan, 'msg-2')
+    yield Promise.resolve()
+
+    actual.push( yield take(chan) )
+  }
+
+  function* root() {
+    yield fork(fnB)
+    yield fork(fnA)
+  }
+
+
+
+  middleware.run(root).done.then(() => {
+    assert.deepEqual(actual, ['msg-1', 'ack-1', 'msg-2', 'ack-2'],
+      "Sagas must take actions from each other (via buffered channel) in the right order"
+    );
+    assert.end();
+  })
+
+});
+
+test('inter-saga fork/take back from forked child', assert => {
+  assert.plan(1);
+
+  const actual = []
+  const chan = channel()
+
+  const middleware = sagaMiddleware()
+  const store = createStore(() => {}, applyMiddleware(middleware))
+
+
+  function* root() {
+    yield [fork(takeEvery1), fork(takeEvery2)]
+  }
+
+  function* takeEvery1() {
+    yield* takeEvery('TEST', takeTest1);
+  }
+
+  function* takeEvery2() {
+    yield* takeEvery('TEST2', takeTest2);
+  }
+
+  let testCounter = 0;
+
+  function* takeTest1(action) {
+    if (testCounter === 0){
+        actual.push(1)
+        testCounter++;
+
+        yield put({type: 'TEST2'})
+    } else {
+        actual.push(++testCounter)
+    }
+  }
+
+  function* takeTest2(action) {
+    yield [fork(forkedPut1), fork(forkedPut2)]
+  }
+
+
+  function* forkedPut1() {
+    yield put({type: 'TEST'})
+  }
+
+  function* forkedPut2() {
+    yield put({type: 'TEST'})
+  }
+
+  middleware.run(root).done.then(() => {
+    assert.deepEqual(actual, [1,2,3],
+      "Sagas must take actions from each forked childs doing Sync puts"
+    );
+    assert.end();
+  })
+
+  store.dispatch({type: 'TEST'})
+  store.dispatch(END)
 });

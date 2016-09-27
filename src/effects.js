@@ -1,3 +1,1 @@
-import { take, put, race, call, apply, cps, fork, join, cancel, select } from './internal/io'
-
-export { take, put, race, call, apply, cps, fork, join, cancel, select }
+export { take, takem, put, race, call, apply, cps, fork, spawn, join, cancel, select, actionChannel, cancelled, flush } from './internal/io'

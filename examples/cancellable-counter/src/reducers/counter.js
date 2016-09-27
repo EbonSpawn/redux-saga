@@ -3,16 +3,17 @@ import {
   DECREMENT,
   INCREMENT_IF_ODD,
   INCREMENT_ASYNC,
-  CANCEL_INCREMENT_ASYNC
+  CANCEL_INCREMENT_ASYNC,
+  COUNTDOWN_TERMINATED
 } from '../actionTypes'
 
-export function incrementAsyncPending(state = false, action) {
+export function countdown(state = 0, action) {
   switch (action.type) {
     case INCREMENT_ASYNC:
-      return true
-    case INCREMENT:
+      return action.value
+    case COUNTDOWN_TERMINATED:
     case CANCEL_INCREMENT_ASYNC:
-      return false
+      return 0
     default:
       return state
   }

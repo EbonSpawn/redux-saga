@@ -1,7 +1,7 @@
 import test from 'tape';
 import proc from '../../src/internal/proc'
 import * as io from '../../src/effects'
-import emitter from '../../src/internal/emitter'
+import {emitter, channel} from '../../src/internal/channel'
 
 
 test('proc put handling', assert => {
@@ -27,6 +27,34 @@ test('proc put handling', assert => {
 
 });
 
+test('proc put in a channel', assert => {
+  assert.plan(1)
+
+  const buffer = []
+  const spyBuffer = {
+    isEmpty: () => !buffer.length,
+    put: (it) => buffer.push(it),
+    take: () => buffer.shift()
+  }
+  const chan = channel(spyBuffer)
+
+  function* genFn(arg) {
+    yield io.put(chan, arg)
+    yield io.put(chan, 2)
+  }
+
+  proc(genFn('arg')).done.catch(err => assert.fail(err))
+
+  const expected = ['arg', 2];
+  setTimeout(() => {
+    assert.deepEqual(buffer, expected,
+      "proc must handle puts on a given channel"
+    );
+    assert.end();
+  })
+
+});
+
 test('proc async put\'s response handling', assert => {
   assert.plan(1)
 
@@ -34,8 +62,8 @@ test('proc async put\'s response handling', assert => {
   const dispatch = v => Promise.resolve(v)
 
   function* genFn(arg) {
-    actual.push(yield io.put(arg))
-    actual.push(yield io.put(2))
+    actual.push(yield io.put.sync(arg))
+    actual.push(yield io.put.sync(2))
   }
 
   proc(genFn('arg'), undefined, dispatch).done.catch(err => assert.fail(err))
